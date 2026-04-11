@@ -1,4 +1,75 @@
-.env
-./env
-.venv
+
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Ambiente virtual
+venv/
+.env/
+.env
+
+# ==============================
+#  Jupyter
+# ==============================
+.ipynb_checkpoints
+
+# ==============================
+#  Test / Coverage
+# ==============================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ==============================
+#  Logs
+# ==============================
+*.log
+logs/
+
+# ==============================
+#  VS Code
+# ==============================
+.vscode/
+
+# ==============================
+#  Banco de Dados
+# ==============================
+*.db
+*.sqlite3
+
+# ==============================
+#  Build / dist
+# ==============================
+build/
+dist/
+*.egg-info/
+
+
+# Ignora tudo dentro de data
+data/raw/*
+data/processed/*
+data/external/*
+
+
+!data/raw/README.md
+!data/processed/README.md
+!data/external/README.md
+
+models/
+*.pkl
+*.joblib
+*.model
+
+outputs/
+reports/
+
+.env
+secrets.yaml
+config_local.yaml
+
+docker-compose.override.yml
+
+.DS_Store
+Thumbs.db
