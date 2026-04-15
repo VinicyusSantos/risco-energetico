@@ -1,5 +1,6 @@
 import pandas as pd
-from io import StringIO
+import zipfile
+import io
 from datetime import datetime
 from src.utils.http import get
 from src.utils.logger import get_logger
@@ -8,134 +9,146 @@ logger = get_logger()
 
 STATIONS = {
     "SUDESTE": [
-        {"code": "A701", "city": "SAO_PAULO", "state": "SP"},
-        {"code": "A510", "city": "BELO_HORIZONTE", "state": "MG"},
-        {"code": "A621", "city": "RIO_DE_JANEIRO", "state": "RJ"}
+        "SAO PAULO", "BELO HORIZONTE", "RIO DE JANEIRO"
     ],
     "SUL": [
-        {"code": "A807", "city": "CURITIBA", "state": "PR"},
-        {"code": "A869", "city": "PORTO_ALEGRE", "state": "RS"},
-        {"code": "A810", "city": "FLORIANOPOLIS", "state": "SC"}
+        "CURITIBA", "PORTO ALEGRE", "FLORIANOPOLIS"
     ],
     "NORDESTE": [
-        {"code": "A301", "city": "RECIFE", "state": "PE"},
-        {"code": "A404", "city": "SALVADOR", "state": "BA"},
-        {"code": "A306", "city": "FORTALEZA", "state": "CE"}
+        "RECIFE", "SALVADOR", "FORTALEZA"
     ],
     "NORTE": [
-        {"code": "A101", "city": "MANAUS", "state": "AM"},
-        {"code": "A102", "city": "BELEM", "state": "PA"},
-        {"code": "A113", "city": "PORTO_VELHO", "state": "RO"}
+        "MANAUS", "BELEM", "PORTO VELHO"
     ]
 }
 
 YEARS = list(range(2016, 2027))
 
-BASE_URL = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{year}/INMET_{region}_{state}_{code}_{city}_01-01-{year}_A_31-12-{year}.CSV"
-
-COLUMN_MAP = {
-    "data": "data",
-    "precipitacao total": "chuva",
-    "temperatura do ar": "temperatura"
-}
+BASE_URL = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{year}.zip"
 
 
-def build_url(year, region, station):
-    region_map = {
-        "SUDESTE": "SE",
-        "SUL": "S",
-        "NORDESTE": "NE",
-        "NORTE": "N"
-    }
-
-    return BASE_URL.format(
-        year=year,
-        region=region_map[region],
-        state=station["state"],
-        code=station["code"],
-        city=station["city"]
-    )
-
-
-def fetch_data(url):
-    logger.info(f"Baixando: {url}")
+def fetch_zip(year):
+    url = BASE_URL.format(year=year)
+    logger.info(f"Baixando ZIP: {url}")
     response = get(url)
-    return response.text
+    return response.content
 
 
-def parse_response(csv_content):
+def extract_files(zip_content):
+    z = zipfile.ZipFile(io.BytesIO(zip_content))
+    return z.namelist(), z
+
+
+def parse_csv(file_name, zip_file):
+    if not file_name.lower().endswith(".csv"):
+        return None
+
     try:
-        df = pd.read_csv(
-            StringIO(csv_content),
-            sep=";",
-            skiprows=8,
-            encoding="latin1"
-        )
+        with zip_file.open(file_name) as f:
+            content = f.read()
+
+            if len(content) < 1000:
+                return None
+
+            df = pd.read_csv(
+                io.BytesIO(content),
+                sep=";",
+                encoding="latin1",
+                skiprows=8,
+                on_bad_lines="skip"
+            )
+
         return df
+
     except Exception as e:
-        logger.error(f"Erro ao parsear CSV: {e}")
+        logger.warning(f"Erro ao ler {file_name}: {e}")
         return None
 
 
-def preprocess(df, region, station):
-    df.columns = [col.strip().lower() for col in df.columns]
+def identify_region(file_name):
+    file_name_lower = file_name.lower()
 
-    rename_dict = {}
-    for col in df.columns:
-        for key in COLUMN_MAP:
-            if key in col.lower():
-                rename_dict[col] = COLUMN_MAP[key]
+    for region, cities in STATIONS.items():
+        for city in cities:
+            if city.lower() in file_name_lower:
+                return region
 
-    df = df.rename(columns=rename_dict)
+    return None
 
-    required = ["data", "chuva", "temperatura"]
-    for col in required:
-        if col not in df.columns:
-            logger.warning(f"Coluna ausente: {col}")
-            return None
 
-    df = df[required]
+def preprocess(df, file_name):
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    region = identify_region(file_name)
+    if not region:
+        return None
+
+    data_col = next((c for c in df.columns if "data" in c), None)
+    chuva_col = next((c for c in df.columns if "precip" in c), None)
+    temp_col = next((c for c in df.columns if "temperatura" in c), None)
+
+    if not data_col or not chuva_col or not temp_col:
+        return None
+
+    df = df[[data_col, chuva_col, temp_col]]
+    df.columns = ["data", "chuva", "temperatura"]
 
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
+
+    df["chuva"] = (
+        df["chuva"]
+        .astype(str)
+        .str.replace(",", ".")
+    )
+
+    df["temperatura"] = (
+        df["temperatura"]
+        .astype(str)
+        .str.replace(",", ".")
+    )
+
     df["chuva"] = pd.to_numeric(df["chuva"], errors="coerce")
     df["temperatura"] = pd.to_numeric(df["temperatura"], errors="coerce")
+
+    # =========================
+    # TRATAMENTO INMET
+    # =========================
+    df["chuva"] = df["chuva"].replace([-9999, -9999.0], pd.NA)
+    df["temperatura"] = df["temperatura"].replace([-9999, -9999.0], pd.NA)
+
+    df = df[(df["temperatura"] > -50)]
+
+    df = df.sort_values("data")
+
+    # MISSING VALUES
+
+    # chuva → zero faz sentido físico
+    df["chuva"] = df["chuva"].fillna(0)
+
+    # temperatura → interpolação segura
+    df["temperatura"] = df["temperatura"].astype(float)
+    df["temperatura"] = df["temperatura"].interpolate(
+        method="linear",
+        limit_direction="both"
+    )
 
     df = df.dropna()
 
     df["regiao"] = region
-    df["estacao"] = station["city"]
 
     return df
 
 
-def collect_station(region, station):
-    dfs = []
+def validate_data(df):
+    logger.info("Validando dados...")
 
-    for year in YEARS:
-        try:
-            url = build_url(year, region, station)
+    if df["chuva"].min() < 0:
+        raise Exception("Valores negativos de chuva detectados")
 
-            raw = fetch_data(url)
-            df = parse_response(raw)
+    if df["temperatura"].min() < -50:
+        raise Exception("Temperatura inválida detectada")
 
-            if df is None:
-                continue
-
-            df = preprocess(df, region, station)
-
-            if df is None:
-                continue
-
-            dfs.append(df)
-
-        except Exception as e:
-            logger.warning(f"Erro no ano {year} ({region}-{station['city']}): {e}")
-            continue
-
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-    else:
-        return None
+    logger.info("Validação OK")
 
 
 def collect_all():
@@ -143,14 +156,29 @@ def collect_all():
 
     all_dfs = []
 
-    for region, stations in STATIONS.items():
-        logger.info(f"Processando região: {region}")
+    for year in YEARS:
+        try:
+            logger.info(f"Processando ano: {year}")
 
-        for station in stations:
-            df_station = collect_station(region, station)
+            zip_content = fetch_zip(year)
+            file_names, zip_file = extract_files(zip_content)
 
-            if df_station is not None:
-                all_dfs.append(df_station)
+            for file_name in file_names:
+                df = parse_csv(file_name, zip_file)
+
+                if df is None:
+                    continue
+
+                df = preprocess(df, file_name)
+
+                if df is None:
+                    continue
+
+                all_dfs.append(df)
+
+        except Exception as e:
+            logger.warning(f"Erro no ano {year}: {e}")
+            continue
 
     if not all_dfs:
         raise Exception("Nenhum dado coletado do INMET")
@@ -163,19 +191,29 @@ def collect_all():
         df_final
         .groupby(["data", "regiao"])
         .agg({
-            "chuva": "mean",
-            "temperatura": "mean"
+            "chuva": "sum",           
+            "temperatura": "mean"     
         })
         .reset_index()
     )
 
+    df_agg = df_agg.sort_values(["regiao", "data"])
+
+    df_agg["temperatura"] = (
+        df_agg
+        .groupby("regiao")["temperatura"]
+        .transform(lambda x: x.astype(float).interpolate(limit_direction="both"))
+    )
+
     logger.info(f"Shape após agregação: {df_agg.shape}")
+
+    validate_data(df_agg)
 
     return df_agg
 
 
 def save_raw_data(df):
-    path = f"data/raw/inmet_latest.csv"
+    path = "data/raw/inmet_latest.csv"
     df.to_csv(path, index=False)
     logger.info(f"Dados salvos em {path}")
 
