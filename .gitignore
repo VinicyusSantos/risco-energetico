@@ -47,11 +47,6 @@ dist/
 *.egg-info/
 
 
-# Ignora tudo dentro de data
-data/raw/*
-data/processed/*
-data/external/*
-
 
 !data/raw/README.md
 !data/processed/README.md
