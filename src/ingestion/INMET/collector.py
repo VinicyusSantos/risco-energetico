@@ -214,8 +214,10 @@ def collect_all():
 
 def save_raw_data(df):
     path = "data/raw/inmet_latest.csv"
+    path2 = "data/processed/inmet_latest.csv"
     df.to_csv(path, index=False)
-    logger.info(f"Dados salvos em {path}")
+    df.to_csv(path2, index=False)
+    logger.info(f"Dados salvos em {path} e {path2}")
 
 
 def run():
